@@ -17,7 +17,8 @@ OPENCV_LIBS = $(shell $(PKG_CONFIG) --libs opencv4)
 # The '.' tells the compiler to include the current directory in the list of directories to search for the header files
 INCLUDES = -I. $(LIBCAMERA_CFLAGS) $(LIBEVENT_CFLAGS) $(OPENCV_CFLAGS) \
            -I/home/pi/libcamera/include/linux \
-           -I/usr/include
+           -I/usr/include \
+           -I/home/pi/yaml-cpp/include
 
 # Libraries
 LIBS = $(LIBCAMERA_LIBS) $(LIBEVENT_LIBS) $(OPENCV_LIBS)
@@ -28,7 +29,7 @@ SIMPLE_CAM_SRCS = main.cpp $(COMMON_SRCS)
 #DUAL_CAM_SRCS = dual-camera.cpp $(COMMON_SRCS)
 
 # Output executables
-TARGET = single-camera
+TARGET = calibrateRightCamera
 #TARGET2 = dual-camera
 
 # Default target

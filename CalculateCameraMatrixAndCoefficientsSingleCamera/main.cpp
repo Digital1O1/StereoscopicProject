@@ -21,6 +21,7 @@
 #include "image.h"
 #include "event_loop.h"
 #include <X11/Xlib.h>
+#include <yaml-cpp/yaml.h>
 
 #define TIMEOUT_SEC 50
 #define RESOLUTION_WIDTH 640
@@ -29,7 +30,10 @@
 #define CHESSBOARD_COLUMNS 9
 #define CHESSBOARD_SIZE cv::Size(CHESSBOARD_ROWS, CHESSBOARD_COLUMNS)
 #define NUMBER_OF_IMAGES 20
-#define CAPTURE_DELAY 100
+#define CAPTURE_DELAY 300
+#define LEFT_CAMERA 0
+#define RIGHT_CAMERA 1
+#define CALIBATION_DELAY 100
 
 using namespace libcamera;
 static std::shared_ptr<Camera> camera;
@@ -38,15 +42,29 @@ static EventLoop loop;
 int userInput = 0;
 int userInputCounter = 1;
 int imagesCaptured = 0;
+bool calibrationComplete = false;
+static bool calibrationStarted = false;
+
 const int CHESSBOARD[2]{CHESSBOARD_ROWS, CHESSBOARD_COLUMNS};
+cv::Mat R, T;
+cv::Mat previewWindow, gray;
+
+cv::Mat cameraMatrix(3, 3, CV_64F);
+cv::Mat distCoeffs(1, 5, CV_64F);
 std::vector<std::vector<cv::Point3f>> objectPoints;
 std::vector<std::vector<cv::Point2f>> imagePoints;
-std::vector<cv::Point3f> objp;
+std::vector<cv::Point3f> objectPointsList;
 std::vector<cv::Point2f> corners;
-int chessBoardFlags = cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK;
 
+int chessBoardFlags = cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK;
+std::string calibratedFrame = "";
 std::map<libcamera::FrameBuffer *, std::unique_ptr<Image>> mappedBuffers_;
 
+// Specify the filename
+std::string filename = "RightCamera1.yaml";
+
+// Create a FileStorage object in write mode
+cv::FileStorage saveFS(filename, cv::FileStorage::WRITE);
 /*
  * --------------------------------------------------------------------
  * Handle RequestComplete
@@ -72,10 +90,12 @@ static void requestComplete(Request *request)
     loop.callLater(std::bind(&processRequest, request));
 }
 
-void processPixelData(FrameBuffer *buffer, const StreamConfiguration &cfg, cv::Mat &rgb_image)
-{
-    Image *img = mappedBuffers_[buffer].get();
+// void processPixelData(FrameBuffer *buffer, uint8_t ptr, const StreamConfiguration &cfg, cv::Mat &processedImage)
+void processPixelData(FrameBuffer *buffer, const StreamConfiguration &cfg, cv::Mat &processedImage)
 
+{
+
+    Image *img = mappedBuffers_[buffer].get();
     uint8_t *ptr = (uint8_t *)img->data(0).data();
 
     cv::Mat yData = cv::Mat(cfg.size.height, cfg.size.width, CV_8U, ptr, cfg.stride);
@@ -86,74 +106,22 @@ void processPixelData(FrameBuffer *buffer, const StreamConfiguration &cfg, cv::M
     cv::resize(uData, uData, cv::Size(cfg.size.width, cfg.size.height), 0, 0, cv::INTER_LINEAR);
     cv::resize(vData, vData, cv::Size(cfg.size.width, cfg.size.height), 0, 0, cv::INTER_LINEAR);
 
+    // Combine the different channels into one
     std::vector<cv::Mat> yuv_channels = {yData, uData, vData};
     cv::Mat yuv_image;
     cv::merge(yuv_channels, yuv_image);
 
-    cv::cvtColor(yuv_image, rgb_image, cv::COLOR_YUV2BGR);
+    cv::cvtColor(yuv_image, processedImage, cv::COLOR_YUV2BGR);
 }
 
 static void processRequest(Request *request)
 {
-    // std::cout << std::endl
-    //           << "Request completed: " << request->toString() << std::endl;
-
-    /*
-     * When a request has completed, it is populated with a metadata control
-     * list that allows an application to determine various properties of
-     * the completed request. This can include the timestamp of the Sensor
-     * capture, or its gain and exposure values, or properties from the IPA
-     * such as the state of the 3A algorithms.
-     *
-     * ControlValue types have a toString, so to examine each request, print
-     * all the metadata for inspection. A custom application can parse each
-     * of these items and process them according to its needs.
-     */
-
-    // const ControlList &requestMetadata = request->metadata();
-    // for (const auto &ctrl : requestMetadata)
-    // {
-
-    //     const ControlId *id = controls::controls.at(ctrl.first);
-    //     const ControlValue &value = ctrl.second;
-
-    //     std::cout << "\t" << id->name() << " = " << value.toString()
-    //               << std::endl;
-    // }
-
-    /*
-     * Each buffer has its own FrameMetadata to describe its state, or the
-     * usage of each buffer. While in our simple capture we only provide one
-     * buffer per request, a request can have a buffer for each stream that
-     * is established when configuring the camera.
-     *
-     * This allows a viewfinder and a still image to be processed at the
-     * same time, or to allow obtaining the RAW capture buffer from the
-     * sensor along with the image as processed by the ISP.
-     */
     const Request::BufferMap &buffers = request->buffers();
-    // ----------------------------- [ for (auto bufferPair : buffers) START ] -----------------------------
+
     for (auto bufferPair : buffers)
     {
         const Stream *stream = bufferPair.first;
         FrameBuffer *buffer = bufferPair.second;
-
-        // const FrameMetadata &metadata = buffer->metadata();
-
-        /* Print some information about the buffer which has completed. */
-        // std::cout << " seq: " << std::setw(6) << std::setfill('0') << metadata.sequence
-        //           << " timestamp: " << metadata.timestamp
-        //           << " bytesused: ";
-
-        // unsigned int nplane = 0;
-        // for (const FrameMetadata::Plane &plane : metadata.planes())
-        // {
-        //     std::cout << plane.bytesused;
-        //     if (++nplane < metadata.planes().size())
-        //         std::cout << "/";
-        // }
-
-        // std::cout << std::endl;
 
         StreamConfiguration const &cfg = stream->configuration();
 
@@ -163,55 +131,99 @@ static void processRequest(Request *request)
             exit(1);
         }
 
-        /*
-         * Image data can be accessed here, but the FrameBuffer
-         * must be mapped by the application
-         *
-         */
-
-        // Image *img = mappedBuffers_[buffer].get();
-        // const libcamera::ColorSpace &colorSpace = libcamera::ColorSpace(cfg.colorSpace.value());
-        // std::string colorSpaceStr = colorSpace.toString();
-        //  std::cout << "\n --------------------------- [DEBUG INFORMATION ]---------------------------" << std::endl;
-        //  std::cout << "\n"
-        //            << "Resolution" << " : " << cfg.size.width << " x " << cfg.size.height << std::endl;
-        //  std::cout << "Number of bytes in each line of image buffer " << " : " << cfg.stride << std::endl;
-        //  std::cout << "pixelFormat" << " : " << cfg.pixelFormat << std::endl;
-        //  std::cout << "img->numPlanes() : " << img->numPlanes() << std::endl;
-        //  std::cout << "Color Space : " << colorSpaceStr << std::endl;                                                                          // sYCC
-        //  std::cout << "colorSpace.Primaries : " << (int)libcamera::ColorSpace::Primaries(colorSpace.primaries) << std::endl;                   // Rec709
-        //  std::cout << "colorSpace.TransferFunction : " << (int)libcamera::ColorSpace::YcbcrEncoding(colorSpace.transferFunction) << std::endl; // Srgb
-        //  std::cout << "colorSpace.ycbcrEncoding : " << (int)libcamera::ColorSpace::YcbcrEncoding(colorSpace.ycbcrEncoding) << std::endl;       // Rec601
-        //  std::cout << "colorSpace.Range : " << (int)libcamera::ColorSpace::YcbcrEncoding(colorSpace.range) << std::endl;                       // Full
-
-        // std::cout << "\n ---------------------------------------------------------------------------" << std::endl;
-
-        cv::Mat previewWindow, gray;
         processPixelData(buffer, cfg, previewWindow);
-        cv::namedWindow("PREVIEW WINDOW", cv::WINDOW_AUTOSIZE);
-        cv::imshow("PREVIEW WINDOW", previewWindow);
-        cv::moveWindow("PREVIEW WINDOW", (1920 - 640) / 2, (1080 - 480) / 2);
         cv::cvtColor(previewWindow, gray, cv::COLOR_BGR2GRAY);
 
-        bool found = findChessboardCorners(gray, CHESSBOARD_SIZE, corners, chessBoardFlags);
+        int key = cv::waitKey(1);
 
-        if (found)
+        // Start calibration when the space bar is pressed
+        if (key == 32 && !calibrationStarted)
         {
-            // cv::cornerSubPix(gray, corners, cv::Size(11, 11), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.001));
-            // cv::drawChessboardCorners(gray, CHESSBOARD_SIZE, corners, found);
-            // imagePoints.push_back(corners);
-            // objectPoints.push_back(objp);
-            imagesCaptured++;
-            std::cout << "Number of images captured " << ": [" << imagesCaptured << "]\n";
+            calibrationStarted = true;
+            std::cout << "Space bar pressed. Starting calibration." << std::endl;
+        }
+
+        if (calibrationStarted)
+        {
+            if (!calibrationComplete)
+            {
+                // The findChessboardCorners() is computationally heavy and will cause a noticeable visual delay if not inside this `if` statement
+                bool found = findChessboardCorners(gray, CHESSBOARD_SIZE, corners, chessBoardFlags);
+                if (found)
+                {
+                    cv::cornerSubPix(gray, corners, cv::Size(11, 11), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.001));
+                    cv::drawChessboardCorners(gray, CHESSBOARD_SIZE, corners, found);
+
+                    imagePoints.push_back(corners);
+                    objectPoints.push_back(objectPointsList);
+                    imagesCaptured++;
+
+                    std::cout << "\nNumber of images captured " << ": [ " << imagesCaptured << " ] out of [ " << NUMBER_OF_IMAGES << " ] \n ";
+                    cv::waitKey(100);
+                }
+
+                if (imagesCaptured == NUMBER_OF_IMAGES)
+                {
+                    cv::destroyWindow("PREVIEW WINDOW");
+                    std::cout << "\n ---------------------------------------------------------------------------" << std::endl;
+
+                    printf("\nGenerating camera calibration values and distortion values\r\n");
+
+                    cv::calibrateCamera(objectPoints, imagePoints, previewWindow.size(), cameraMatrix, distCoeffs, R, T);
+
+                    std::cout << std::endl
+                              << "Camera Matrix:\n\n"
+                              << cameraMatrix << std::endl;
+                    std::cout << std::endl
+                              << "Distortion Coefficients:\n\n"
+                              << distCoeffs << std::endl;
+
+                    saveFS << "cameraMatrix" << cameraMatrix;
+                    saveFS << "distortionCoefficients" << distCoeffs;
+
+                    saveFS.release();
+
+                    std::cout << "Camera Matrix YAML values : " << cameraMatrix << std::endl;
+                    std::cout << "Distortion Coefficients YAML values : " << distCoeffs << std::endl;
+
+                    std::cout << "Homography matricies are saved to : " << filename << std::endl;
+
+                    calibrationComplete = true;
+                    // std::cout << "Calibration status: " << calibrationComplete << std::endl;
+
+                    printf("Calibration complete! Applying calculated camera matrix and distortion \r\n");
+                }
+
+                if (!calibrationComplete)
+                {
+                    printf("Image not captured. Please reposition calibration chessboard.\r\n");
+                    cv::namedWindow("PREVIEW WINDOW", cv::WINDOW_AUTOSIZE);
+                    cv::imshow("PREVIEW WINDOW", previewWindow);
+                    cv::moveWindow("PREVIEW WINDOW", (1920 - 640) / 2, (1080 - 480) / 2);
+                    cv::waitKey(1);
+                }
+            }
+
+            if (calibrationComplete)
+            {
+                cv::Mat undistort, hconcatImage;
+                cv::undistort(previewWindow, undistort, cameraMatrix, distCoeffs);
+                cv::hconcat(previewWindow, undistort, hconcatImage);
+
+                cv::imshow("hconcatImage", hconcatImage);
+                cv::moveWindow("hconcatImage", (1920 - hconcatImage.cols) / 2, (1080 - hconcatImage.rows) / 2);
+                cv::waitKey(1);
+            }
         }
         else
         {
-            printf("Image not captured \r\n");
+            cv::namedWindow("PLACE CALIBRATION CHESSBOARD TO CAMERA", cv::WINDOW_AUTOSIZE);
+            cv::imshow("PLACE CALIBRATION CHESSBOARD TO CAMERA", previewWindow);
+            cv::moveWindow("PLACE CALIBRATION CHESSBOARD TO CAMERA", (1920 - 640) / 2, (1080 - 480) / 2);
+            cv::waitKey(1);
         }
     }
-    // ----------------------------- [ for (auto bufferPair : buffers) END ] -----------------------------
 
-    /* Re-queue the Request to the camera. */
     request->reuse(Request::ReuseBuffers);
     camera->queueRequest(request);
 }
@@ -326,7 +338,7 @@ int main()
         return EXIT_FAILURE;
     }
 
-    std::string cameraId = cm->cameras()[0]->id();
+    std::string cameraId = cm->cameras()[RIGHT_CAMERA]->id();
     camera = cm->get(cameraId);
     camera->acquire();
 
@@ -614,6 +626,30 @@ int main()
         // std::cout << "Request : " << camera->queueRequest(request.get()) << std::endl;
     }
     // camera->queueRequest(request.get());
+
+    // ---------------------------- Populate vectors needed for chessboard calibration  ----------------------------
+
+    for (int i = 0; i < CHESSBOARD[1]; i++)
+    {
+        for (int j = 0; j < CHESSBOARD[0]; j++)
+        {
+            objectPointsList.push_back(cv::Point3f(j, i, 0));
+        }
+    }
+    // ---------------------------- YAML stuff  ----------------------------
+    // // Specify the filename
+    // std::string filename = "camera.yaml";
+
+    // // Create a FileStorage object in write mode
+    // cv::FileStorage saveFS(filename, cv::FileStorage::WRITE);
+
+    // Check if it is opened properly
+    if (!saveFS.isOpened())
+    {
+        std::cerr << "Failed to open " << filename << std::endl;
+        return -1;
+    }
+
     /*
      * --------------------------------------------------------------------
      * Run an EventLoop
@@ -623,6 +659,7 @@ int main()
      */
 
     // Have loop run indefinently
+
     loop.exec();
 
     // loop.timeout(TIMEOUT_SEC);

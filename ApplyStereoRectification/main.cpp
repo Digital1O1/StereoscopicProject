@@ -19,62 +19,26 @@
 #include "event_loop.h"
 #include <X11/Xlib.h>
 #include <string>
-#include <yaml-cpp/yaml.h>
 
-#define TIMEOUT_SEC 50
+#define TIMEOUT_SEC 9999
 #define RESOLUTION_WIDTH 640
-#define RESOLUTION_LENGTH 480
-#define CHESSBOARD_ROWS 6
-#define CHESSBOARD_COLUMNS 9
-#define CHESSBOARD_SIZE cv::Size(CHESSBOARD_ROWS, CHESSBOARD_COLUMNS)
-#define NUMBER_OF_IMAGES 20
-#define CAPTURE_DELAY 300
-#define LEFT_CAMERA 0
-#define RIGHT_CAMERA 1
-#define CALIBATION_DELAY 100
-
+#define RESOLUTION_HEIGHT 480
 using namespace libcamera;
 static std::shared_ptr<Camera> camera0;
 static std::shared_ptr<Camera> camera1;
 Image *img;
 Image *img2;
 int userInput = 0;
-int userInputCounter = 1;
-int imagesCaptured = 0;
-bool calibrationComplete = false;
-static bool calibrationStarted = false;
-bool calibrationInProgress = false;
-int chessBoardFlags = cv::CALIB_CB_ADAPTIVE_THRESH | cv::CALIB_CB_NORMALIZE_IMAGE | cv::CALIB_CB_FAST_CHECK;
-const int CHESSBOARD[2]{CHESSBOARD_ROWS, CHESSBOARD_COLUMNS};
-
 cv::Mat leftImage, rightImage;
 static EventLoop loop;
-std::vector<std::vector<cv::Point2f>> imagePoints1, imagePoints2;
-cv::Mat leftCameraMatrix, rightCameraMatrix, leftDistnaceCoefficients, rightDistanceCoefficents, leftGray, rightGray;
-cv::Mat cameraMatrix1, cameraMatrix2, distCoeffs1, distCoeffs2;
-cv::Mat concatenated_image;
-cv::Mat cameraMatrixLeft(3, 3, CV_64F);
-cv::Mat distCoeffsLeft(1, 5, CV_64F);
-cv::Mat cameraMatrixRight(3, 3, CV_64F);
-cv::Mat distCoeffsRight(1, 5, CV_64F);
-cv::Mat rotationMatrix, translationVector, essentialMatrix, fundamentalMatrix;
-
-std::vector<std::vector<cv::Point3f>> objectPointsLeft, objectPointsRight;
-std::vector<std::vector<cv::Point2f>> imagePointsLeft, imagePointsRight;
-std::vector<cv::Point2f> cornersLeft, cornersRight;
-std::vector<cv::Point3f> objectPointsListLeft, objectPointsListRight, objectPoints;
-std::vector<std::vector<cv::Point3f>> objectPointsList;
-
-cv::Mat leftRotationVector, leftTranslationVector, El, Fl;
-cv::Mat rightRotationVector, rightTranslationVector, Er, Fr;
-
-std::string leftCameraYAML = "leftCamera.yaml";
-std::string rightCameraYAML = "rightCamera.yaml";
-std::string stereoCalibrateYAML = "stereoCalibrate.yaml";
-
-cv::FileStorage leftCameraYAMLFS(leftCameraYAML, cv::FileStorage::WRITE);
-cv::FileStorage rightCameraYAMLFS(rightCameraYAML, cv::FileStorage::WRITE);
-cv::FileStorage stereoCalibrateYAMLFS(stereoCalibrateYAML, cv::FileStorage::WRITE);
+cv::Mat leftCameraMatrix, leftDistnaceCoefficients, leftTranslationVector, leftRotationVector;
+cv::Mat rightCameraMatrix, rightDistanceCoefficents, rightTranslationVector, rightRotationVector;
+cv::Mat stereoRotationMatrix, stereoTranslationVector, stereoEssentialMatrix, stereoFundamentalMatrix;
+cv::Mat map1Left, map2Left, map1Right, map2Right;
+cv::Mat R1, R2, P1, P2, Q;
+cv::Mat rectifiedLeft, rectifiedRight, rectifiedOutput;
+cv::Mat overlayedImage;
+double alpha = 0.5; // Blending factor
 
 /*
     notes about mappedBuffers_
@@ -110,48 +74,6 @@ std::map<libcamera::FrameBuffer *, std::unique_ptr<Image>> mappedBuffers_2;
 
 static void processRequest(Request *request, int cameraID);
 
-void printAndSaveCameraParams(const std::string &cameraName, const cv::Mat &cameraMatrix, const cv::Mat &distCoeffs, const cv::Mat &rotationVector, const cv::Mat &translationVector, cv::FileStorage &fileStorage)
-{
-    std::cout << std::endl
-              << cameraName << " Camera Matrix:\n\n"
-              << cameraMatrix << std::endl;
-    std::cout << std::endl
-              << cameraName << " Distortion Coefficients:\n\n"
-              << distCoeffs << std::endl;
-    std::cout << std::endl
-              << cameraName << " Rotation Vector:\n\n"
-              << rotationVector << std::endl;
-    std::cout << std::endl
-              << cameraName << " Translation Vector:\n\n"
-              << translationVector << std::endl;
-
-    fileStorage << cameraName + "CameraMatrix" << cameraMatrix;
-    fileStorage << cameraName + "DistortionCoefficients" << distCoeffs;
-    fileStorage << cameraName + "RotationVector" << rotationVector;
-    fileStorage << cameraName + "TranslationVector" << translationVector;
-}
-
-// Helper function to process image data
-cv::Mat processImageData(uint8_t *ptr, const StreamConfiguration &cfg, const cv::Size &fixedResolution)
-{
-    cv::Mat allData = cv::Mat(cfg.size.height * 3 / 2, cfg.size.width, CV_8U, ptr, cfg.stride);
-    cv::Mat yData = cv::Mat(cfg.size.height, cfg.size.width, CV_8U, ptr, cfg.stride);
-    cv::Mat uData = cv::Mat(cfg.size.height / 2, cfg.size.width / 2, CV_8U, ptr + cfg.size.width * cfg.size.height);
-    cv::Mat vData = cv::Mat(cfg.size.height / 2, cfg.size.width / 2, CV_8U, ptr + cfg.size.width * cfg.size.height + cfg.size.width / 2 * cfg.size.height / 2);
-
-    cv::resize(uData, uData, fixedResolution, 0, 0, cv::INTER_LINEAR);
-    cv::resize(vData, vData, fixedResolution, 0, 0, cv::INTER_LINEAR);
-
-    std::vector<cv::Mat> yuv_channels = {yData, uData, vData};
-    cv::Mat yuv_image;
-    cv::merge(yuv_channels, yuv_image);
-
-    cv::Mat rgb_image;
-    cv::cvtColor(yuv_image, rgb_image, cv::COLOR_YUV2BGR);
-
-    return rgb_image;
-}
-
 cv::Mat concatenateImages(const cv::Mat &image1, const cv::Mat &image2)
 {
     int total_width = image1.cols + image2.cols;
@@ -185,6 +107,26 @@ void displayImage(const cv::Mat &image, const std::string &windowName)
     cv::imshow(windowName, image);
     cv::moveWindow(windowName, x, y);
     // cv::waitKey(1);
+}
+
+cv::Mat processImageData(uint8_t *ptr, const StreamConfiguration &cfg, const cv::Size &fixedResolution)
+{
+    cv::Mat allData = cv::Mat(cfg.size.height * 3 / 2, cfg.size.width, CV_8U, ptr, cfg.stride);
+    cv::Mat yData = cv::Mat(cfg.size.height, cfg.size.width, CV_8U, ptr, cfg.stride);
+    cv::Mat uData = cv::Mat(cfg.size.height / 2, cfg.size.width / 2, CV_8U, ptr + cfg.size.width * cfg.size.height);
+    cv::Mat vData = cv::Mat(cfg.size.height / 2, cfg.size.width / 2, CV_8U, ptr + cfg.size.width * cfg.size.height + cfg.size.width / 2 * cfg.size.height / 2);
+
+    cv::resize(uData, uData, fixedResolution, 0, 0, cv::INTER_LINEAR);
+    cv::resize(vData, vData, fixedResolution, 0, 0, cv::INTER_LINEAR);
+
+    std::vector<cv::Mat> yuv_channels = {yData, uData, vData};
+    cv::Mat yuv_image;
+    cv::merge(yuv_channels, yuv_image);
+
+    cv::Mat rgb_image;
+    cv::cvtColor(yuv_image, rgb_image, cv::COLOR_YUV2BGR);
+
+    return rgb_image;
 }
 
 // void displayImage(const cv::Mat &image, const std::string &windowName)
@@ -230,15 +172,15 @@ static void requestComplete2(Request *request)
 // ------------------------------------- static void processRequest(Request *request, int cameraID) START -------------------------------------
 static void processRequest(Request *request, int cameraID)
 {
-    static cv::Mat leftCameraRGB;
-    static cv::Mat rightCameraRGB;
+    static cv::Mat leftImage;
+    static cv::Mat rightImage;
     static bool has_image0 = false;
     static bool has_image1 = false;
 
-    // std::cout << "===================== Process request from Camera : [ " << cameraID << " ] ===================== \n";
+    std::cout << "===================== Process request from Camera : [ " << cameraID << " ] ===================== \n";
 
-    // std::cout << std::endl
-    //           << "Request completed : " << request->toString() << std::endl;
+    std::cout << std::endl
+              << "Request completed : " << request->toString() << std::endl;
 
     /*
      * When a request has completed, it is populated with a metadata control
@@ -254,17 +196,17 @@ static void processRequest(Request *request, int cameraID)
      * all the metadata for inspection. A custom application can parse each
      * of these items and process them according to its needs.
      */
-    // const ControlList &requestMetadata = request->metadata();
+    const ControlList &requestMetadata = request->metadata();
 
-    // for (const auto &ctrl : requestMetadata)
-    // {
+    for (const auto &ctrl : requestMetadata)
+    {
 
-    //     const ControlId *id = controls::controls.at(ctrl.first);
-    //     const ControlValue &value = ctrl.second;
+        const ControlId *id = controls::controls.at(ctrl.first);
+        const ControlValue &value = ctrl.second;
 
-    //     std::cout << "\t" << id->name() << " = " << value.toString()
-    //               << std::endl;
-    // }
+        std::cout << "\t" << id->name() << " = " << value.toString()
+                  << std::endl;
+    }
 
     /*
      * Each buffer has its own FrameMetadata to describe its state, or the
@@ -283,23 +225,23 @@ static void processRequest(Request *request, int cameraID)
         const Stream *stream = bufferPair.first;
         FrameBuffer *buffer = bufferPair.second;
 
-        // const FrameMetadata &metadata = buffer->metadata();
+        const FrameMetadata &metadata = buffer->metadata();
 
         /* Print some information about the buffer which has completed. */
         // Segmentation fault with camera1 is somewhere in here
-        // std::cout << " seq: " << std::setw(6) << std::setfill('0') << metadata.sequence
-        //           << " timestamp: " << metadata.timestamp
-        //           << " bytesused: ";
+        std::cout << " seq: " << std::setw(6) << std::setfill('0') << metadata.sequence
+                  << " timestamp: " << metadata.timestamp
+                  << " bytesused: ";
 
-        // unsigned int nplane = 0;
-        // for (const FrameMetadata::Plane &plane : metadata.planes())
-        // {
-        //     std::cout << plane.bytesused;
-        //     if (++nplane < metadata.planes().size())
-        //         std::cout << "/";
-        // }
+        unsigned int nplane = 0;
+        for (const FrameMetadata::Plane &plane : metadata.planes())
+        {
+            std::cout << plane.bytesused;
+            if (++nplane < metadata.planes().size())
+                std::cout << "/";
+        }
 
-        // std::cout << std::endl;
+        std::cout << std::endl;
 
         StreamConfiguration const &cfg = stream->configuration();
 
@@ -338,19 +280,19 @@ static void processRequest(Request *request, int cameraID)
 
         uint8_t *ptr = (uint8_t *)img->data(0).data();
         // uint8_t *ptr = (uint8_t *)img->data(0).data();
-        cv::Size fixedResolution(RESOLUTION_WIDTH, RESOLUTION_LENGTH);
+        cv::Size fixedResolution(RESOLUTION_WIDTH, RESOLUTION_HEIGHT);
 
         cv::Mat rgb_image = processImageData(ptr, stream->configuration(), fixedResolution);
 
         // Store the processed image based on cameraID
         if (cameraID == 0)
         {
-            leftCameraRGB = rgb_image;
+            leftImage = rgb_image;
             has_image0 = true;
         }
         else if (cameraID == 1)
         {
-            rightCameraRGB = rgb_image;
+            rightImage = rgb_image;
             has_image1 = true;
         }
         else
@@ -359,106 +301,63 @@ static void processRequest(Request *request, int cameraID)
             exit(1);
         }
 
-        userInput = cv::waitKey(1);
-
         // Display concatenated images when both are available
-        if (has_image0 && has_image1 && !calibrationInProgress)
+        if (has_image0 && has_image1)
         {
-            concatenated_image = concatenateImages(leftCameraRGB, rightCameraRGB);
-            displayImage(concatenated_image, "PREVIEW WINDOW");
+            // Values used from cv::calibrateCamera() individually and stereoCalibrate()
+            // Double check flags
+            cv::stereoRectify(leftCameraMatrix, leftDistnaceCoefficients,
+                              rightCameraMatrix, rightDistanceCoefficents,
+                              leftImage.size(), stereoRotationMatrix, stereoTranslationVector,
+                              R1, R2, P1, P2, Q,
+                              cv::CALIB_ZERO_DISPARITY, -1, leftImage.size(), 0, 0);
+
+            cv::initUndistortRectifyMap(leftCameraMatrix, leftDistnaceCoefficients, R1, P1, leftImage.size(), CV_32FC1, map1Left, map2Left);
+            cv::initUndistortRectifyMap(rightCameraMatrix, rightDistanceCoefficents, R2, P2, rightImage.size(), CV_32FC1, map1Right, map2Right);
+
+            cv::remap(leftImage, rectifiedLeft, map1Left, map2Left, cv::INTER_LINEAR);
+            cv::remap(rightImage, rectifiedRight, map1Right, map2Right, cv::INTER_LINEAR);
+
+            cv::resize(rectifiedLeft, rectifiedLeft, cv::Size(1920, 1080));
+            cv::resize(rectifiedRight, rectifiedRight, cv::Size(1920, 1080));
+
+            cv::hconcat(rectifiedLeft, rectifiedRight, rectifiedOutput);
+            cv::imshow("rectifiedOutput", rectifiedOutput);
+
+            int imageWidth = rectifiedOutput.cols;
+            int imageHeight = rectifiedOutput.rows;
+            int screenWidth = 1920;
+            int screenHeight = 1080;
+            int x = (screenWidth - imageWidth) / 2;
+            int y = (screenHeight - imageHeight) / 2;
+            cv::moveWindow("rectifiedOutput", x, y);
+
+            // cv::Mat x = concatenateImages(rectifiedLeft, rectifiedRight);
+            // displayImage(x, "Combined image");
+            // double alpha = 0.5; // Blending factor
+            // cv::addWeighted(rectifiedLeft, alpha, rectifiedRight, 1 - alpha, 0.0, overlayedImage);
+
+            // cv::imshow("Overlayed Image", overlayedImage);
+
+            // cv::waitKey(1);
+            // cv::imwrite("overlayed_image.png", overlayedImage);
+            // if (userInput == 32)
+            // {
+            //     imwrite("leftImage.jpg", leftImage);
+            //     imwrite("rightImage.jpg", rightImage);
+            // }
+            // cv::Mat concatenated_image = concatenateImages(leftImage, rightImage);
+            // displayImage(concatenated_image, "Video resolution 640 x 480");
+            // // cv::imshow("Concatenated Camera Frames", concatenated_image);
+            // // cv::waitKey(1);
+
+            // Reset flags for the next frame
+            has_image0 = false;
+            has_image1 = false;
         }
-
-        if (userInput == 32 && !calibrationStarted)
-        {
-            calibrationStarted = true;
-            calibrationInProgress = true;
-            cv::destroyWindow("PREVIEW WINDOW");
-            std::cout << "Space bar pressed. Starting calibration." << std::endl;
-        }
-
-        if (has_image0 && has_image1 && calibrationInProgress && !calibrationComplete)
-        {
-            concatenated_image = concatenateImages(leftCameraRGB, rightCameraRGB);
-            displayImage(concatenated_image, "CALIBRATION WINDOW");
-
-            cv::cvtColor(leftCameraRGB, leftGray, cv::COLOR_BGR2GRAY);
-            cv::cvtColor(rightCameraRGB, rightGray, cv::COLOR_BGR2GRAY);
-
-            bool foundLeft = findChessboardCorners(leftGray, CHESSBOARD_SIZE, cornersLeft, chessBoardFlags);
-            bool foundRight = findChessboardCorners(rightGray, CHESSBOARD_SIZE, cornersRight, chessBoardFlags);
-
-            if (foundLeft && foundRight)
-            {
-                cv::cornerSubPix(leftGray, cornersLeft, cv::Size(11, 11), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.001));
-                cv::drawChessboardCorners(leftGray, CHESSBOARD_SIZE, cornersLeft, foundLeft);
-
-                cv::cornerSubPix(rightGray, cornersRight, cv::Size(11, 11), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.001));
-                cv::drawChessboardCorners(rightGray, CHESSBOARD_SIZE, cornersRight, foundRight);
-
-                imagePointsLeft.push_back(cornersLeft);
-                imagePointsRight.push_back(cornersRight);
-
-                objectPointsLeft.push_back(objectPointsListLeft);
-                objectPointsRight.push_back(objectPointsListRight);
-                objectPointsList.push_back(objectPoints);
-
-                imagesCaptured++;
-
-                std::cout << "\nNumber of images captured " << ": [ " << imagesCaptured << " ] out of [ " << NUMBER_OF_IMAGES << " ] \n ";
-                // cv::waitKey(100);
-
-                if (imagesCaptured == NUMBER_OF_IMAGES)
-                {
-                    cv::destroyWindow("CALIBRATION WINDOW");
-                    std::cout << "\n ---------------------------------------------------------------------------" << std::endl;
-
-                    printf("\nGenerating camera calibration values and distortion values\r\n");
-
-                    cv::calibrateCamera(objectPointsLeft, imagePointsLeft, leftCameraRGB.size(), cameraMatrixLeft, distCoeffsLeft, leftRotationVector, leftTranslationVector);
-
-                    cv::calibrateCamera(objectPointsRight, imagePointsRight, rightCameraRGB.size(), cameraMatrixRight, distCoeffsRight, rightRotationVector, rightTranslationVector);
-
-                    double rms = cv::stereoCalibrate(
-                        objectPointsList, imagePointsLeft, imagePointsRight,
-                        cameraMatrixLeft, distCoeffsLeft,
-                        cameraMatrixRight, distCoeffsRight,
-                        leftCameraRGB.size(), rotationMatrix, translationVector, essentialMatrix, fundamentalMatrix,
-                        cv::CALIB_FIX_INTRINSIC,
-                        cv::TermCriteria(cv::TermCriteria::COUNT + cv::TermCriteria::EPS, 100, 1e-6));
-
-                    printAndSaveCameraParams("Left", cameraMatrixLeft, distCoeffsLeft, leftRotationVector, leftTranslationVector, leftCameraYAMLFS);
-                    printAndSaveCameraParams("Right", cameraMatrixRight, distCoeffsRight, rightRotationVector, rightTranslationVector, rightCameraYAMLFS);
-
-                    stereoCalibrateYAMLFS << "stereoRMS" << rms;
-                    stereoCalibrateYAMLFS << "rotationMatrix" << rotationMatrix;
-                    stereoCalibrateYAMLFS << "translationVector" << translationVector;
-                    stereoCalibrateYAMLFS << "essentialMatrix" << essentialMatrix;
-                    stereoCalibrateYAMLFS << "fundamentalMatrix" << fundamentalMatrix;
-
-                    leftCameraYAMLFS.release();
-                    rightCameraYAMLFS.release();
-                    stereoCalibrateYAMLFS.release();
-
-                    std::cout << "\nHomography matrices are saved to: " << leftCameraYAML << " and " << rightCameraYAML << std::endl;
-                    std::cout << "\nStereo Calibration done with RMS error = " << rms << std::endl;
-                    std::cout << "\nR: " << rotationMatrix << "\n\nT: " << translationVector << "\n\nE: " << essentialMatrix << "\n\nF: " << fundamentalMatrix << std::endl;
-
-                    calibrationComplete = true;
-
-                    if (calibrationComplete)
-                    {
-                        printf("\n\nCALIBRATION COMPLETE! EXITING PROGRAM NOW...\r\n");
-                        exit(1);
-                    }
-                }
-            }
-            else
-            {
-                printf("Image not captured. Please reposition calibration chessboard.\r\n");
-            }
-        }
-
-    } // End of for (auto bufferPair : buffers)
+        // userInput = cv::waitKey(1);
+        cv::waitKey(1);
+    }
 
     /* Re-queue the Request to the camera. */
     request->reuse(Request::ReuseBuffers);
@@ -467,29 +366,28 @@ static void processRequest(Request *request, int cameraID)
     {
         cameraRequestCode = camera0->queueRequest(request);
         // queueRequest() should return 0 if everything is okay
-        if (cameraRequestCode)
+        if (!cameraRequestCode)
+        {
+            std::cout << "\nCamera0 request complete\n\n";
+        }
+        else
         {
 
             std::cout << "Camera0 failed with the following error : " << cameraRequestCode << std::endl;
         }
-        // else
-        // {
-
-        //     std::cout << "Camera0 failed with the following error : " << cameraRequestCode << std::endl;
-        // }
     }
     else if (cameraID == 1)
     {
         cameraRequestCode = camera1->queueRequest(request);
 
-        if (cameraRequestCode)
+        if (!cameraRequestCode)
+        {
+            std::cout << "\nCamera1 request complete\n\n";
+        }
+        else
         {
             std::cout << "Camera0 failed with the following error : " << cameraRequestCode << std::endl;
         }
-        // else
-        // {
-        //     std::cout << "Camera0 failed with the following error : " << cameraRequestCode << std::endl;
-        // }
     }
     else
     {
@@ -549,55 +447,78 @@ std::string cameraName(Camera *camera)
 
 int main()
 {
-    imagePointsLeft.clear();
-    imagePointsRight.clear();
-    objectPointsLeft.clear();
-    objectPointsRight.clear();
-    objectPointsList.clear();
 
-    for (int i = 0; i < CHESSBOARD[1]; i++)
+    std::cout << "\n\n__________________________________ [ READING YAML FILE ]__________________________________\n\n";
+    cv::FileStorage leftCameraYAML("/home/pi/StereoscopicProject/ConductCameraCalibrationDualCamera/leftCamera.yaml", cv::FileStorage::READ);
+    cv::FileStorage rightCameraYAML("/home/pi/StereoscopicProject/ConductCameraCalibrationDualCamera/rightCamera.yaml", cv::FileStorage::READ);
+    cv::FileStorage stereoCalibrateYAML("/home/pi/StereoscopicProject/ConductCameraCalibrationDualCamera/stereoCalibrate.yaml", cv::FileStorage::READ);
+
+    if (leftCameraYAML.isOpened() && rightCameraYAML.isOpened())
     {
-        for (int j = 0; j < CHESSBOARD[0]; j++)
-        {
-            objectPointsListLeft.push_back(cv::Point3f(j, i, 0));
-            objectPointsListRight.push_back(cv::Point3f(j, i, 0));
-            objectPoints.push_back(cv::Point3f(j, i, 0));
-        }
+        // Reading data from the YAML files into the matrices
+        leftCameraYAML["LeftCameraMatrix"] >> leftCameraMatrix;
+        leftCameraYAML["LeftDistortionCoefficients"] >> leftDistnaceCoefficients;
+        leftCameraYAML["LeftRotationVector"] >> leftRotationVector;
+        leftCameraYAML["LeftTranslationVector"] >> leftTranslationVector;
+
+        rightCameraYAML["RightCameraMatrix"] >> rightCameraMatrix;
+        rightCameraYAML["RightDistortionCoefficients"] >> rightDistanceCoefficents;
+        rightCameraYAML["RightRotationVector"] >> rightTranslationVector;
+        rightCameraYAML["RightTranslationVector"] >> rightRotationVector;
+
+        stereoCalibrateYAML["rotationMatrix"] >> stereoRotationMatrix;
+        stereoCalibrateYAML["translationVector"] >> stereoTranslationVector;
+        stereoCalibrateYAML["essentialMatrix"] >> stereoEssentialMatrix;
+        stereoCalibrateYAML["fundamentalMatrix"] >> stereoFundamentalMatrix;
+
+        // Printing out the saved values
+        // std::cout
+        //     << "\n\n__________________________________ [ PRINTING OUT SAVED YAML VALUES ]__________________________________\n\n";
+
+        // std::cout << "leftCameraMatrix\n\n"
+        //           << leftCameraMatrix << std::endl
+        //           << std::endl;
+        // std::cout << "leftDistnaceCoefficients\n\n"
+        //           << leftDistnaceCoefficients << std::endl
+        //           << std::endl;
+        // std::cout << "LeftRotationVector\n\n"
+        //           << leftRotationVector << std::endl
+        //           << std::endl;
+        // std::cout << "LeftTranslationVector\n\n"
+        //           << leftTranslationVector << std::endl
+        //           << std::endl;
+
+        // std::cout << "rightCameraMatrix\n\n"
+        //           << rightCameraMatrix << std::endl
+        //           << std::endl;
+        // std::cout << "rightDistanceCoefficents\n\n"
+        //           << rightDistanceCoefficents << std::endl
+        //           << std::endl;
+        // std::cout << "RightRotationVector\n\n"
+        //           << rightTranslationVector << std::endl
+        //           << std::endl;
+        // std::cout << "RightTranslationVector\n\n"
+        //           << rightRotationVector << std::endl
+        //           << std::endl;
+
+        // std::cout << "rotationMatrix\n\n"
+        //           << stereoRotationMatrix << std::endl
+        //           << std::endl;
+        // std::cout << "translationVector\n\n"
+        //           << stereoTranslationVector << std::endl
+        //           << std::endl;
+        // std::cout << "essentialMatrix\n\n"
+        //           << stereoEssentialMatrix << std::endl
+        //           << std::endl;
+        // std::cout << "fundamentalMatrix\n\n"
+        //           << stereoFundamentalMatrix << std::endl
+        //           << std::endl;
     }
-
-    // std::cout << "\n\n__________________________________ [ READING YAML FILE ]__________________________________\n\n";
-    // cv::FileStorage leftCameraYAML("/home/pi/StereoscopicProject/C++Folder/CalculateCameraMatrixAndCoefficients/LeftCamera0.yaml", cv::FileStorage::READ);
-    // cv::FileStorage rightCameraYAML("/home/pi/StereoscopicProject/C++Folder/CalculateCameraMatrixAndCoefficients/RightCamera1.yaml", cv::FileStorage::READ);
-
-    // if (leftCameraYAML.isOpened() && rightCameraYAML.isOpened())
-    // {
-    //     leftCameraYAML["leftCameraMatrix"] >> leftCameraMatrix;
-    //     leftCameraYAML["leftDistnaceCoefficients"] >> leftDistnaceCoefficients;
-
-    //     rightCameraYAML["rightCameraMatrix"] >> rightCameraMatrix;
-    //     rightCameraYAML["rightDistanceCoefficents"] >> rightDistanceCoefficents;
-
-    //     std::cout << "\n\n__________________________________ [ PRINTING OUT SAVED YAML VALUES ]__________________________________\n\n";
-
-    //     std::cout << "leftCameraMatrix\n\n"
-    //               << leftCameraMatrix << std::endl
-    //               << std::endl;
-    //     std::cout << "leftDistnaceCoefficients\n\n"
-    //               << leftDistnaceCoefficients << std::endl
-    //               << std::endl;
-
-    //     std::cout << "rightCameraMatrix\n\n"
-    //               << rightCameraMatrix << std::endl
-    //               << std::endl;
-    //     std::cout << "rightDistanceCoefficents\n\n"
-    //               << rightDistanceCoefficents << std::endl
-    //               << std::endl;
-    // }
-    // else
-    // {
-    //     std::cerr << "Failed to open calibration data file." << std::endl;
-    //     return -1;
-    // }
+    else
+    {
+        std::cerr << "Failed to open calibration data file." << std::endl;
+        return -1;
+    }
 
     /*
      * --------------------------------------------------------------------
@@ -661,8 +582,8 @@ int main()
         return EXIT_FAILURE;
     }
 
-    std::string cameraId = cm->cameras()[LEFT_CAMERA]->id();
-    std::string cameraId2 = cm->cameras()[RIGHT_CAMERA]->id();
+    std::string cameraId = cm->cameras()[0]->id();
+    std::string cameraId2 = cm->cameras()[1]->id();
 
     // std::cout << "cameraId : " << cameraId << std::endl
     // 		  << "cameraId2 : " << cameraId2 << std::endl;
@@ -789,11 +710,11 @@ int main()
     // streamConfig.pixelFormat = formats::YUYV; // 'Column striations'
     streamConfig.pixelFormat = formats::YUV420; // Results in grayscale w/o striations
     streamConfig.size.width = RESOLUTION_WIDTH;
-    streamConfig.size.height = RESOLUTION_LENGTH;
+    streamConfig.size.height = RESOLUTION_HEIGHT;
 
     streamConfig2.pixelFormat = formats::YUV420; // Results in grayscale w/o striations
     streamConfig2.size.width = RESOLUTION_WIDTH;
-    streamConfig2.size.height = RESOLUTION_LENGTH;
+    streamConfig2.size.height = RESOLUTION_HEIGHT;
 
     /*
      * Each StreamConfiguration parameter which is part of a
@@ -851,10 +772,6 @@ int main()
 
      */
 
-    /*/
-        ERROR AS OF 8/13
-        Camera in AVAILABLE state trying configure() requiring state between Acquired and Configured
-    */
     int camera0ConfigState = camera0->configure(config.get());
     int camera1ConfigState = camera1->configure(config2.get());
 
@@ -1113,10 +1030,7 @@ int main()
     // int ret = loop.exec();
     // std::cout << "Capture ran for [ " << TIMEOUT_SEC << " ] seconds and "
     //           << "stopped with exit status : " << ret << std::endl;
-
-    // Run program indefinitely
     loop.exec();
-
     /*
      * --------------------------------------------------------------------
      * Clean Up

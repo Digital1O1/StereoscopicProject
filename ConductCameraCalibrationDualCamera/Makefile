@@ -25,10 +25,10 @@ LIBS = $(LIBCAMERA_LIBS) $(LIBEVENT_LIBS) $(OPENCV_LIBS)
 
 # Source files
 COMMON_SRCS = event_loop.cpp image.cpp
-SRCS = dual-camera.cpp $(COMMON_SRCS)
+SRCS = calibrationDualCamera.cpp $(COMMON_SRCS)
 
 # Output executables
-TARGET = stereoRectification
+TARGET = DualCameraCalibration
 
 # Default target
 all: $(TARGET) 

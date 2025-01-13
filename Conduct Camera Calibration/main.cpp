@@ -1,8 +1,3 @@
-/*
-    References
-        - https://stackoverflow.com/questions/22037558/opencv-camera-calibration-generate-very-distorted-images
-*/
-
 #include <opencv2/opencv.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/highgui.hpp>
@@ -10,158 +5,137 @@
 #include <iostream>
 #include <vector>
 
-#define NOIR_CAMERA 0
-#define VISIBLE_CAMERA 1
+// Constants
 #define CHESSBOARD_ROWS 6
 #define CHESSBOARD_COLUMNS 9
 #define CHESSBOARD_SIZE cv::Size(CHESSBOARD_ROWS, CHESSBOARD_COLUMNS)
 #define NUMBER_OF_IMAGES 20
 #define CAPTURE_DELAY 100
-void calibrateCamera(int cameraId, const char *cameraName);
+
+void calibrateCamera(const std::string &cameraPipeline, const std::string &cameraName);
 
 int main()
 {
-    calibrateCamera(NOIR_CAMERA, "NOIR Camera");
-    calibrateCamera(VISIBLE_CAMERA, "Visible Camera");
+    // GStreamer pipelines
+    std::string visibleCameraPipeline = R"(
+        libcamerasrc camera-name="/base/soc/i2c0mux/i2c@1/imx219@10" ! 
+        video/x-raw,width=640,height=480,framerate=30/1 ! 
+        videoconvert ! 
+        video/x-raw,format=(string)BGR ! 
+        queue ! 
+        appsink
+    )";
+
+    std::string irCameraPipeline = R"(
+        libcamerasrc camera-name="/base/soc/i2c0mux/i2c@0/imx219@10" ! 
+        video/x-raw,width=640,height=480,framerate=30/1 ! 
+        videoconvert ! 
+        video/x-raw,format=(string)BGR ! 
+        queue ! 
+        appsink
+    )";
+
+    // Calibrate both cameras
+    calibrateCamera(visibleCameraPipeline, "Visible Camera");
+    calibrateCamera(irCameraPipeline, "IR Camera");
 
     return 0;
 }
 
-void calibrateCamera(int cameraId, const char *cameraName)
+void calibrateCamera(const std::string &cameraPipeline, const std::string &cameraName)
 {
-    const int CHESSBOARD[2]{CHESSBOARD_ROWS, CHESSBOARD_COLUMNS};
     std::vector<std::vector<cv::Point3f>> objectPoints;
     std::vector<std::vector<cv::Point2f>> imagePoints;
     std::vector<cv::Point3f> objp;
 
-    for (int i = 0; i < CHESSBOARD[1]; i++)
+    // Prepare object points
+    for (int i = 0; i < CHESSBOARD_COLUMNS; ++i)
     {
-        for (int j = 0; j < CHESSBOARD[0]; j++)
+        for (int j = 0; j < CHESSBOARD_ROWS; ++j)
         {
             objp.push_back(cv::Point3f(j, i, 0));
         }
     }
 
-    cv::Mat frame, gray;
-    std::vector<cv::Point2f> corners;
-
-    cv::VideoCapture cap(cameraId);
+    cv::VideoCapture cap(cameraPipeline, cv::CAP_GSTREAMER);
     if (!cap.isOpened())
     {
-        std::cerr << "Error opening " << cameraName << std::endl;
+        std::cerr << "Error opening " << cameraName << " pipeline" << std::endl;
         return;
     }
 
-    bool previewFlag = true;
-    std::cout << "Press 'q or Q' to continue with calibration for " << cameraName << "\n";
+    cv::Mat frame, gray;
+    std::vector<cv::Point2f> corners;
 
-    while (previewFlag)
+    // Preview mode
+    std::cout << "Press 'q' to exit the preview for " << cameraName << "\n";
+    while (true)
     {
         cap >> frame;
         if (frame.empty())
-        {
-            std::cerr << "Empty frame" << std::endl;
             continue;
-        }
-        cv::imshow("Preview window for " + std::string(cameraName), frame);
 
-        if (cv::waitKey(1) == 'q' || cv::waitKey(1) == 'Q')
-        {
-            previewFlag = false;
-        }
+        cv::imshow("Preview - " + cameraName, frame);
+        if (cv::waitKey(1) == 'q')
+            break;
     }
-    previewFlag = true;
-    std::string closePreview = "Preview window for " + std::string(cameraName);
-    cv::destroyWindow(closePreview);
+    cv::destroyWindow("Preview - " + cameraName);
 
-    std::cout << "\nCapturing " << NUMBER_OF_IMAGES << " chessboard images now. Rotate chessboard slowly for " << cameraName << "\n\n";
-
+    // Capture chessboard images
+    std::cout << "Capturing " << NUMBER_OF_IMAGES << " chessboard images for " << cameraName << "\n";
     int imagesCaptured = 0;
+
     while (imagesCaptured < NUMBER_OF_IMAGES)
     {
         cap >> frame;
         if (frame.empty())
-        {
             break;
-        }
+
         cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-        bool found = cv::findChessboardCorners(gray, CHESSBOARD_SIZE, corners, cv::CALIB_CB_ADAPTIVE_THRESH || cv::CALIB_CB_NORMALIZE_IMAGE || cv::CALIB_CB_FAST_CHECK);
+        bool found = cv::findChessboardCorners(gray, CHESSBOARD_SIZE, corners,
+                                               cv::CALIB_CB_ADAPTIVE_THRESH |
+                                                   cv::CALIB_CB_NORMALIZE_IMAGE |
+                                                   cv::CALIB_CB_FAST_CHECK);
+
         if (found)
         {
-            cv::cornerSubPix(gray, corners, cv::Size(11, 11), cv::Size(-1, -1), cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.001));
+            cv::cornerSubPix(gray, corners, cv::Size(11, 11), cv::Size(-1, -1),
+                             cv::TermCriteria(cv::TermCriteria::EPS + cv::TermCriteria::COUNT, 30, 0.001));
             cv::drawChessboardCorners(frame, CHESSBOARD_SIZE, corners, found);
+
             imagePoints.push_back(corners);
             objectPoints.push_back(objp);
-            imagesCaptured++;
-            std::cout << "Number of images captured for " << cameraName << ": [" << imagesCaptured << "]\n";
-        }
-        else
-        {
-            printf("Image not captured \r\n");
+            ++imagesCaptured;
+            std::cout << "Captured " << imagesCaptured << " / " << NUMBER_OF_IMAGES << " images.\n";
         }
 
-        cv::imshow("Captured Image For Calibration - " + std::string(cameraName), frame);
+        cv::imshow("Capturing - " + cameraName, frame);
         if (cv::waitKey(CAPTURE_DELAY) == 27)
-        {
-            std::cout << "\nExiting program now...\n";
-            break;
-        }
+            break; // Exit on 'Esc'
     }
-    printf("\nGenerating camera calibration values and distortion values\r\n");
+    cv::destroyWindow("Capturing - " + cameraName);
 
-    std::string windowName = "Captured Image For Calibration - " + std::string(cameraName);
-    cv::destroyWindow(windowName);
-
-    // cv::Mat cameraMatrix, distCoeffs, R, T;
-    cv::Mat R, T;
-    cv::Mat cameraMatrix(3, 3, CV_64F);
-    cv::Mat distCoeffs(1, 5, CV_64F);
-
+    // Calibrate camera
+    std::cout << "Calibrating " << cameraName << "...\n";
+    cv::Mat cameraMatrix, distCoeffs, R, T;
     cv::calibrateCamera(objectPoints, imagePoints, frame.size(), cameraMatrix, distCoeffs, R, T);
 
-    std::cout << std::endl
-              << cameraName << " Matrix:\n\n"
-              << cameraMatrix << std::endl;
-    std::cout << std::endl
-              << cameraName << " Distortion Coefficients:\n\n"
-              << distCoeffs << std::endl;
+    std::cout << cameraName << " Camera Matrix:\n"
+              << cameraMatrix << "\n";
+    std::cout << cameraName << " Distortion Coefficients:\n"
+              << distCoeffs << "\n";
 
-    // Preview image before testing out camera calibration
-    std::cout
-        << "\nImage preview, press Q or q to test camera calibration"
-        << std::endl;
-
-    while (previewFlag)
-    {
-        cap >> frame;
-        if (frame.empty())
-        {
-            std::cerr << "Empty frame" << std::endl;
-            continue;
-        }
-        cv::imshow("Preview Window for Undistorted image", frame);
-
-        if (cv::waitKey(1) == 'q' || cv::waitKey(1) == 'Q')
-        {
-            previewFlag = false;
-        }
-    }
-    cv::destroyWindow("Preview Window for Undistorted image");
-
-    // Capture image
-    cv::Mat capturedImage;
+    // Display undistorted image
+    cv::Mat capturedImage, undistortedImage;
     cap >> capturedImage;
 
-    // Undistort the captured image
-    cv::Mat undistortedImage;
-    cv::undistort(capturedImage, undistortedImage, cameraMatrix, distCoeffs);
-
-    // Display the original and undistorted images
-    cv::imshow("Captured Image " + std::string(cameraName), capturedImage);
-    cv::imshow("Undistorted Image " + std::string(cameraName), undistortedImage);
-
-    // Wait for a key press before exiting
-    cv::waitKey(0);
+    if (!capturedImage.empty())
+    {
+        cv::undistort(capturedImage, undistortedImage, cameraMatrix, distCoeffs);
+        cv::imshow("Original - " + cameraName, capturedImage);
+        cv::imshow("Undistorted - " + cameraName, undistortedImage);
+        cv::waitKey(0);
+    }
 
     cap.release();
     cv::destroyAllWindows();
